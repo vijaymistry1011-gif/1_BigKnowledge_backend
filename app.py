@@ -7,7 +7,9 @@ from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
-
+from flask import Flask
+from flask_cors import CORS
+ # <-- Yeh line honi bahut zaroori hai!
 from models import (
     db, User, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
     InnovationItem, StartupIdea, ProjectTask, RoadmapMilestone,
@@ -17,7 +19,7 @@ from models import (
 load_dotenv()
 
 app = Flask(__name__)
-
+CORS(app)
 # Automatic SQLite / PostgreSQL Configuration
 db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
 if db_url.startswith("postgres://"):
