@@ -1,0 +1,280 @@
+import os
+import json
+from datetime import timedelta
+from flask import Flask, render_template, request, jsonify, Response
+from flask_jwt_extended import JWTManager, create_access_token
+from werkzeug.security import generate_password_hash
+from dotenv import load_dotenv
+import cloudinary
+import cloudinary.uploader
+
+from models import (
+    db, User, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
+    InnovationItem, StartupIdea, ProjectTask, RoadmapMilestone,
+    JournalEntry, GoalHabit, OrganizationCRM
+)
+
+load_dotenv()
+
+app = Flask(__name__)
+
+# Automatic SQLite / PostgreSQL Configuration
+db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "bigknowledge-secret-2026")
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "bigknowledge-jwt-2026")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=7)
+
+if os.environ.get("CLOUDINARY_URL"):
+    cloudinary.config(cloudinary_url=os.environ.get("CLOUDINARY_URL"))
+
+db.init_app(app)
+jwt = JWTManager(app)
+
+# Sirf Tables banayenge, koi Fake Data nahi bharna hai
+with app.app_context():
+    db.create_all()
+    if User.query.count() == 0:
+        founder = User(
+            name="Vijay Dakeni",
+            email="founder@bigknowledge.io",
+            password_hash=generate_password_hash("admin123"),
+            role="Founder"
+        )
+        db.session.add(founder)
+        db.session.commit()
+
+@app.route("/")
+def dashboard_home():
+    return render_template("index.html")
+
+@app.route("/login")
+def login_page():
+    return render_template("login.html")
+
+@app.route("/api/bootstrap", methods=["GET"])
+def api_bootstrap():
+    return jsonify({
+        "knowledge": [
+            {"id": k.id, "title": k.title, "category": k.category, "content": k.content, "media_url": k.media_url, "tags": k.tags, "is_favorite": k.is_favorite, "created_at": k.created_at.strftime("%Y-%m-%d")}
+            for k in KnowledgeItem.query.order_by(KnowledgeItem.id.desc()).all()
+        ],
+        "problems": [
+            {"id": p.id, "title": p.title, "source": p.source, "root_cause": p.root_cause, "solution": p.proposed_solution, "market_demand": p.market_demand, "competition_level": p.competition_level, "revenue_potential": p.revenue_potential, "opportunity_score": p.opportunity_score}
+            for p in Problem.query.order_by(Problem.opportunity_score.desc()).all()
+        ],
+        "solutions": [
+            {"id": s.id, "problem_title": s.problem_title, "solution_title": s.solution_title, "cost_estimate": s.cost_estimate, "benefits": s.benefits, "market_impact": s.market_impact, "difficulty": s.difficulty, "revenue_potential": s.revenue_potential}
+            for s in SolutionItem.query.order_by(SolutionItem.id.desc()).all()
+        ],
+        "innovations": [
+            {"id": i.id, "title": i.title, "category": i.category, "summary": i.summary, "opportunity_note": i.opportunity_note}
+            for i in InnovationItem.query.order_by(InnovationItem.id.desc()).all()
+        ],
+        "startups": [
+            {"id": st.id, "name": st.name, "description": st.description, "market": st.market, "industry": st.industry, "revenue_model": st.revenue_model, "competitors": st.competitors, "market_size": st.market_size, "validation_status": st.validation_status, "stage": st.stage, "priority": st.priority, "feasibility_score": st.feasibility_score, "progress": st.progress, "time_spent_hours": st.time_spent_hours}
+            for st in StartupIdea.query.order_by(StartupIdea.id.desc()).all()
+        ],
+        "tasks": [
+            {"id": t.id, "title": t.title, "project_name": t.project_name, "status": t.status, "kanban_stage": t.kanban_stage, "priority": t.priority, "deadline": t.deadline, "dependencies": t.dependencies, "assignee": t.assignee}
+            for t in ProjectTask.query.order_by(ProjectTask.id.desc()).all()
+        ],
+        "roadmaps": [
+            {"id": r.id, "roadmap_type": r.roadmap_type, "title": r.title, "dependencies": r.dependencies, "deadline": r.deadline, "progress": r.progress}
+            for r in RoadmapMilestone.query.all()
+        ],
+        "journals": [
+            {"id": j.id, "entry_type": j.entry_type, "category_tag": j.category_tag, "title": j.title, "details": j.details, "expected_outcome": j.expected_outcome, "actual_result": j.actual_result, "created_at": j.created_at.strftime("%Y-%m-%d")}
+            for j in JournalEntry.query.order_by(JournalEntry.id.desc()).all()
+        ],
+        "goals_habits": [
+            {"id": g.id, "item_type": g.item_type, "title": g.title, "streak_or_progress": g.streak_or_progress, "completed_today": g.completed_today}
+            for g in GoalHabit.query.all()
+        ],
+        "org_crm": [
+            {"id": c.id, "entity_type": c.entity_type, "name": c.name, "role_or_segment": c.role_or_segment, "department_or_company": c.department_or_company, "details_or_strengths": c.details_or_strengths, "weaknesses_or_actions": c.weaknesses_or_actions, "tasks_completed": c.tasks_completed, "tasks_pending": c.tasks_pending, "work_hours": c.work_hours, "productivity_score": c.productivity_score}
+            for c in OrganizationCRM.query.all()
+        ]
+    })
+
+@app.route("/api/knowledge", methods=["POST", "DELETE"])
+def manage_knowledge():
+    if request.method == "DELETE":
+        item = KnowledgeItem.query.get(request.args.get("id"))
+        if item:
+            db.session.delete(item)
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+    d = request.json
+    item = KnowledgeItem(
+        title=d.get("title", "Untitled"),
+        category=d.get("category", "Note"),
+        content=d.get("content", ""),
+        media_url=d.get("media_url", ""),
+        tags=d.get("tags", "knowledge")
+    )
+    db.session.add(item)
+    db.session.commit()
+    return jsonify({"status": "success", "id": item.id})
+
+@app.route("/api/problems", methods=["POST", "DELETE"])
+def manage_problems():
+    if request.method == "DELETE":
+        p = Problem.query.get(request.args.get("id"))
+        if p:
+            db.session.delete(p)
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+    d = request.json
+    demand = int(d.get("market_demand", 8))
+    score = min(100, demand * 10)
+    p = Problem(
+        title=d.get("title", ""),
+        source=d.get("source", "Real World Observation"),
+        root_cause=d.get("root_cause", ""),
+        proposed_solution=d.get("solution", ""),
+        market_demand=demand,
+        competition_level=d.get("competition_level", "Medium"),
+        revenue_potential=d.get("revenue_potential", "₹10L - ₹1Cr"),
+        opportunity_score=score
+    )
+    db.session.add(p)
+    
+    # Solution table me bhi real entry jodein
+    if d.get("solution"):
+        sol = SolutionItem(
+            problem_title=p.title,
+            solution_title=d.get("solution"),
+            cost_estimate=d.get("cost_estimate", "₹5,000 - ₹25,000"),
+            benefits=d.get("root_cause", ""),
+            market_impact="High" if demand >= 8 else "Medium",
+            revenue_potential=p.revenue_potential
+        )
+        db.session.add(sol)
+
+    if d.get("auto_convert_startup"):
+        st = StartupIdea(
+            name=d.get("startup_name") or p.title[:30],
+            description=d.get("solution", ""),
+            revenue_model=d.get("revenue_model", "SaaS Subscription"),
+            market_size=p.revenue_potential,
+            stage="Validation",
+            priority="High",
+            feasibility_score=score,
+            progress=15
+        )
+        db.session.add(st)
+    db.session.commit()
+    return jsonify({"status": "success", "id": p.id})
+
+@app.route("/api/startups", methods=["POST", "PUT", "DELETE"])
+def manage_startups():
+    if request.method == "DELETE":
+        st = StartupIdea.query.get(request.args.get("id"))
+        if st:
+            db.session.delete(st)
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+    
+    d = request.json
+    if request.method == "PUT":
+        st = StartupIdea.query.get(d.get("id"))
+        if st:
+            if "progress" in d:
+                st.progress = int(d["progress"])
+            if "stage" in d:
+                st.stage = d["stage"]
+            if "feasibility_score" in d:
+                st.feasibility_score = int(d["feasibility_score"])
+            db.session.commit()
+        return jsonify({"status": "updated"})
+
+    st = StartupIdea(
+        name=d.get("name", ""),
+        description=d.get("description", ""),
+        market=d.get("market", "India / Global"),
+        industry=d.get("industry", "SaaS / Tech"),
+        revenue_model=d.get("revenue_model", "Subscription"),
+        competitors=d.get("competitors", "None"),
+        market_size=d.get("market_size", "₹10Cr TAM"),
+        stage=d.get("stage", "Idea"),
+        priority=d.get("priority", "High"),
+        feasibility_score=int(d.get("feasibility_score", 85)),
+        progress=int(d.get("progress", 10))
+    )
+    db.session.add(st)
+    db.session.commit()
+    return jsonify({"status": "success", "id": st.id})
+
+@app.route("/api/tasks", methods=["POST", "PUT", "DELETE"])
+def handle_tasks():
+    if request.method == "DELETE":
+        t = ProjectTask.query.get(request.args.get("id"))
+        if t:
+            db.session.delete(t)
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+
+    d = request.json
+    if request.method == "POST":
+        t = ProjectTask(
+            title=d.get("title", ""),
+            project_name=d.get("project_name", "Main Startup"),
+            status="Todo",
+            kanban_stage=d.get("kanban_stage", "Ideas"),
+            priority=d.get("priority", "High"),
+            deadline=d.get("deadline", "2026-11-30"),
+            assignee=d.get("assignee", "Vijay Dakeni")
+        )
+        db.session.add(t)
+        db.session.commit()
+        return jsonify({"status": "success", "id": t.id})
+    else:
+        t = ProjectTask.query.get(d.get("id"))
+        if t:
+            t.kanban_stage = d.get("kanban_stage", t.kanban_stage)
+            t.status = "Completed" if t.kanban_stage == "Completed" else "In Progress"
+            db.session.commit()
+        return jsonify({"status": "updated"})
+
+@app.route("/api/journals", methods=["POST"])
+def create_journal():
+    d = request.json
+    j = JournalEntry(
+        entry_type=d.get("entry_type", "Founder Journal"),
+        category_tag=d.get("category_tag", "Daily Work"),
+        title=d.get("title", ""),
+        details=d.get("details", ""),
+        expected_outcome=d.get("expected_outcome", ""),
+        actual_result=d.get("actual_result", "")
+    )
+    db.session.add(j)
+    db.session.commit()
+    return jsonify({"status": "success", "id": j.id})
+
+@app.route("/api/export/json", methods=["GET"])
+def export_json():
+    payload = api_bootstrap().get_json()
+    return Response(
+        json.dumps(payload, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment;filename=bigknowledge_backup.json"}
+    )
+
+@app.route("/api/export/csv", methods=["GET"])
+def export_csv():
+    rows = ["ID,Startup Name,Stage,Industry,Revenue Model,Market Size,Feasibility Score,Progress"]
+    for s in StartupIdea.query.all():
+        rows.append(f'{s.id},"{s.name}","{s.stage}","{s.industry}","{s.revenue_model}","{s.market_size}",{s.feasibility_score},{s.progress}')
+    return Response(
+        "\n".join(rows),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=bigknowledge_startups.csv"}
+    )
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)#pip install -r requirements.txt
