@@ -2,6 +2,7 @@ import os
 import json
 from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, Response
+from flask_cors import CORS  # <-- [CHANGE 1] CORS Import kiya gaya
 from flask_jwt_extended import JWTManager, create_access_token
 from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
@@ -20,6 +21,14 @@ from models import (
 load_dotenv()
 
 app = Flask(__name__)
+
+# <-- [CHANGE 2] CORS Enable kiya gaya (Vercel aur Localhost dono ke liye)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"]
+)
 
 # Automatic SQLite / PostgreSQL Configuration
 db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
@@ -57,11 +66,18 @@ with app.app_context():
 
 @app.route("/")
 def dashboard_home():
-    return render_template("index.html")
+    # Agar templates folder hai toh index.html dikhayega, warna API status dega
+    try:
+        return render_template("index.html")
+    except Exception:
+        return jsonify({"status": "live", "service": "BigKnowledge Backend API", "founder": "Mr. Vijay Mistry"})
 
 @app.route("/login")
 def login_page():
-    return render_template("login.html")
+    try:
+        return render_template("login.html")
+    except Exception:
+        return jsonify({"status": "login_endpoint_active"})
 
 @app.route("/api/bootstrap", methods=["GET"])
 def api_bootstrap():
@@ -325,13 +341,12 @@ def ai_assistant():
     """
 
     try:
-        # Calling Groq using the exact Qwen model active in your account
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_query}
             ],
-            model="qwen/qwen3.8-27b",  # Exact model from your terminal list
+            model="qwen/qwen3.8-27b",
             temperature=0.1, 
             response_format={"type": "json_object"}
         )
@@ -349,5 +364,7 @@ def ai_assistant():
             "data": {"error_details": str(e)}
         }), 500
 
+# <-- [CHANGE 3] Render Dynamic Port Support
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
