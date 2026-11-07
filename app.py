@@ -7,9 +7,10 @@ from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
-from flask import Flask
-from flask_cors import CORS
- # <-- Yeh line honi bahut zaroori hai!
+from groq import Groq
+from sqlalchemy import or_
+
+# Ensure you have your models.py in the same folder
 from models import (
     db, User, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
     InnovationItem, StartupIdea, ProjectTask, RoadmapMilestone,
@@ -19,7 +20,7 @@ from models import (
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+
 # Automatic SQLite / PostgreSQL Configuration
 db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
 if db_url.startswith("postgres://"):
@@ -37,12 +38,16 @@ if os.environ.get("CLOUDINARY_URL"):
 db.init_app(app)
 jwt = JWTManager(app)
 
-# Sirf Tables banayenge, koi Fake Data nahi bharna hai
+# Setup Groq Client for Neural Search & AI Co-Founder
+groq_api_key = os.environ.get("GROQ_API_KEY")
+groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
+
+# Database Initialization
 with app.app_context():
     db.create_all()
     if User.query.count() == 0:
         founder = User(
-            name="Vijay Dakeni",
+            name="Mr. Vijay Mistry",
             email="founder@bigknowledge.io",
             password_hash=generate_password_hash("admin123"),
             role="Founder"
@@ -146,7 +151,6 @@ def manage_problems():
     )
     db.session.add(p)
     
-    # Solution table me bhi real entry jodein
     if d.get("solution"):
         sol = SolutionItem(
             problem_title=p.title,
@@ -230,7 +234,7 @@ def handle_tasks():
             kanban_stage=d.get("kanban_stage", "Ideas"),
             priority=d.get("priority", "High"),
             deadline=d.get("deadline", "2026-11-30"),
-            assignee=d.get("assignee", "Vijay Dakeni")
+            assignee=d.get("assignee", "Mr. Vijay Mistry")
         )
         db.session.add(t)
         db.session.commit()
@@ -278,5 +282,72 @@ def export_csv():
         headers={"Content-Disposition": "attachment;filename=bigknowledge_startups.csv"}
     )
 
+# ==============================================================================
+# 🤖 SUPER AI CO-FOUNDER ROUTE (WITH CONTEXT NAVIGATION & QWEN MODEL)
+# ==============================================================================
+@app.route("/api/ai-assistant", methods=["POST"])
+def ai_assistant():
+    if not groq_client:
+        return jsonify({"error": "Groq API key missing in .env"}), 500
+
+    user_query = request.json.get("query", "")
+    if not user_query:
+        return jsonify({"error": "Query is empty"}), 400
+
+    # AI ka Dimag (System Prompt with Website Map)
+    system_prompt = """
+    You are SUPER AI, the core assistant for Mr. Vijay Mistry's 'BigKnowledge' Founder OS.
+    Your job is to understand what Vijay wants and return a STRICT JSON response.
+    
+    Website Map (Pages & What They Contain):
+    1. "NAVIGATE": Use this action to open a page based on what Vijay is looking for.
+       Pages available:
+       - 'code-vault': Opens Developer Code & API Vault. Use this if Vijay asks for code, scripts, terminal commands, Python, or "git add .".
+       - 'finance-ledger': Opens Finance & Cashflow. Use this for money, revenue, expenses, or burn tracker.
+       - 'video-vault': Opens Video Vault. Use this for YouTube links, video notes.
+       - 'kanban-board': Opens Kanban. Use this for execution, tasks, building, sprints.
+       - 'startup-db': Opens Startup Ideas Database.
+       - 'problem-center': Opens Problem Collection Center.
+       - 'knowledge-vault': Opens Knowledge Vault for general text notes and research.
+       - 'journals': Opens Founder Journals and logs.
+       - 'dashboard': Opens Main Dashboard.
+       
+    2. "ADD_TASK": Use when Vijay explicitly says to add a new task.
+    3. "SEARCH": Use when Vijay wants to search his past ideas in the database.
+    4. "CHAT": Use for normal talk, coding help, or business advice.
+
+    You MUST reply ONLY in this JSON format without any markdown or extra text:
+    {
+      "reply": "Your natural Hinglish reply (e.g., 'Vijay bhai, maine Code Vault open kar diya hai jahan aapke git commands hain.')",
+      "action": "ACTION_NAME",
+      "data": { "target": "page-name-from-the-list-above" }
+    }
+    """
+
+    try:
+        # Calling Groq using the exact Qwen model active in your account
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            model="qwen/qwen3.8-27b",  # Exact model from your terminal list
+            temperature=0.1, 
+            response_format={"type": "json_object"}
+        )
+        
+        ai_response_text = chat_completion.choices[0].message.content
+        ai_json = json.loads(ai_response_text)
+        
+        return jsonify(ai_json)
+        
+    except Exception as e:
+        print("🚨 ASLI ERROR YAHAN HAI:", str(e))
+        return jsonify({
+            "reply": "Sorry Vijay bhai, backend me kuch dikkat aa gayi. Terminal error check karein.",
+            "action": "ERROR",
+            "data": {"error_details": str(e)}
+        }), 500
+
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)#pip install -r requirements.txt
+    app.run(debug=True, port=5000)
