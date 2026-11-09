@@ -1,12 +1,14 @@
 import os
 import json
-from datetime import timedelta
+import base64
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
 import cloudinary
+import cloudinary.uploader
 from groq import Groq
 
 from models import (
@@ -15,39 +17,36 @@ from models import (
     JournalEntry, GoalHabit, OrganizationCRM
 )
 
-# Import all 3 Blueprints!
-from advanced_routes import adv_bp
+from advanced_routes import adv_bp, upload_to_5tb_gdrive
 from chat_meeting_routes import chat_bp
 from power_routes import power_bp
 
 load_dotenv()
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
-# Strict + Localhost + Wildcard CORS Support for Vercel Frontend
+# CORS Configuration for Vercel & Localhost
 CORS(
     app,
-    resources={
-        r"/*": {
-            "origins": [
-                "https://1bigknowledgefrontend.vercel.app",
-                "http://localhost:3000",
-                "http://localhost:5000",
-                "http://127.0.0.1:5500",
-                "*"
-            ]
-        }
-    },
+    resources={r"/*": {
+        "origins": [
+            "https://1bigknowledgefrontend.vercel.app",
+            "http://localhost:3000",
+            "http://localhost:5000",
+            "http://127.0.0.1:5500",
+            "*"
+        ]
+    }},
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
 )
 
-# Register Blueprints so /api/adv/*, /api/chat/*, and /api/power/* work!
+# Register All Blueprints
 app.register_blueprint(adv_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(power_bp)
 
-# Automatic SQLite / PostgreSQL Configuration
+# Database Configuration
 db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -67,13 +66,6 @@ jwt = JWTManager(app)
 groq_api_key = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
 
-def safe_int(val, default=0):
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
-
-# Database Initialization
 with app.app_context():
     db.create_all()
     if User.query.count() == 0:
@@ -86,12 +78,6 @@ with app.app_context():
         db.session.add(founder)
         db.session.commit()
 
-# Serve uploaded files cleanly
-@app.route("/static/uploads/<path:filename>")
-def serve_uploads(filename):
-    upload_dir = os.path.join(os.getcwd(), "static", "uploads")
-    return send_from_directory(upload_dir, filename)
-
 @app.route("/")
 def dashboard_home():
     try:
@@ -101,7 +87,7 @@ def dashboard_home():
             "status": "live",
             "service": "BigKnowledge Backend API",
             "founder": "Mr. Vijay Mistry",
-            "endpoints_active": ["core", "adv_bp", "chat_bp", "power_bp"]
+            "gdrive_5tb_connected": bool(os.environ.get("GDRIVE_WEBHOOK_URL"))
         })
 
 @app.route("/login")
@@ -110,6 +96,11 @@ def login_page():
         return render_template("login.html")
     except Exception:
         return jsonify({"status": "login_endpoint_active"})
+
+@app.route("/static/uploads/<path:filename>")
+def serve_uploads(filename):
+    upload_dir = os.path.join(os.getcwd(), "static", "uploads")
+    return send_from_directory(upload_dir, filename)
 
 @app.route("/api/bootstrap", methods=["GET"])
 def api_bootstrap():
@@ -252,36 +243,64 @@ def api_bootstrap():
 @app.route("/api/knowledge", methods=["POST", "DELETE"])
 def manage_knowledge():
     if request.method == "DELETE":
-        item = db.session.get(KnowledgeItem, safe_int(request.args.get("id")))
-        if item:
-            db.session.delete(item)
-            db.session.commit()
+        item_id = request.args.get("id")
+        if item_id:
+            item = db.session.get(KnowledgeItem, int(item_id))
+            if item:
+                db.session.delete(item)
+                db.session.commit()
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
+    title = d.get("title") or "Untitled"
+    category = d.get("category") or "Note"
+    content = d.get("content") or ""
+    media_url = d.get("media_url") or ""
+    tags = d.get("tags") or "knowledge"
+
+    # Agar frontend ne Base64 image/video bheja hai toh seedha 5TB Google Drive me bhejo
+    if media_url.startswith("data:"):
+        try:
+            header, b64_data = media_url.split(",", 1)
+            mime_type = header.split(";")[0].replace("data:", "")
+            ext = mime_type.split("/")[-1] if "/" in mime_type else "bin"
+            file_bytes = base64.b64decode(b64_data)
+            fname = f"vault_{int(datetime.utcnow().timestamp())}.{ext}"
+            drive_link = upload_to_5tb_gdrive(file_bytes, fname, mime_type, sub_folder="Knowledge_Vault_Media")
+            if drive_link:
+                media_url = drive_link
+        except Exception as e:
+            print("Base64 to Drive error:", e)
+
     item = KnowledgeItem(
-        title=d.get("title") or "Untitled",
-        category=d.get("category") or "Note",
-        content=d.get("content") or "",
-        media_url=d.get("media_url") or "",
-        tags=d.get("tags") or "knowledge"
+        title=title,
+        category=category,
+        content=content,
+        media_url=media_url,
+        tags=tags
     )
     db.session.add(item)
     db.session.commit()
-    return jsonify({"status": "success", "id": item.id})
+    return jsonify({"status": "success", "id": item.id, "media_url": media_url})
 
 @app.route("/api/problems", methods=["POST", "DELETE"])
 def manage_problems():
     if request.method == "DELETE":
-        p = db.session.get(Problem, safe_int(request.args.get("id")))
-        if p:
-            db.session.delete(p)
-            db.session.commit()
+        prob_id = request.args.get("id")
+        if prob_id:
+            p = db.session.get(Problem, int(prob_id))
+            if p:
+                db.session.delete(p)
+                db.session.commit()
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
-    demand = safe_int(d.get("market_demand"), 8)
-    score = safe_int(d.get("opportunity_score"), min(100, demand * 10))
+    try:
+        demand = int(d.get("market_demand", 8))
+    except (ValueError, TypeError):
+        demand = 8
+    score = int(d.get("opportunity_score") or min(100, demand * 10))
+
     p = Problem(
         title=d.get("title") or "Untitled Problem",
         source=d.get("source") or "Real World Observation",
@@ -308,7 +327,7 @@ def manage_problems():
     if d.get("auto_convert_startup"):
         st = StartupIdea(
             name=d.get("startup_name") or p.title[:30],
-            description=d.get("solution") or p.root_cause or "Auto-converted from Problem Center",
+            description=d.get("solution") or p.root_cause,
             revenue_model=d.get("revenue_model") or "SaaS Subscription",
             market_size=p.revenue_potential,
             stage="Validation",
@@ -324,27 +343,31 @@ def manage_problems():
 @app.route("/api/startups", methods=["POST", "PUT", "DELETE"])
 def manage_startups():
     if request.method == "DELETE":
-        st = db.session.get(StartupIdea, safe_int(request.args.get("id")))
-        if st:
-            db.session.delete(st)
-            db.session.commit()
+        st_id = request.args.get("id")
+        if st_id:
+            st = db.session.get(StartupIdea, int(st_id))
+            if st:
+                db.session.delete(st)
+                db.session.commit()
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
     if request.method == "PUT":
-        st = db.session.get(StartupIdea, safe_int(d.get("id")))
-        if st:
-            if "progress" in d:
-                st.progress = safe_int(d["progress"], st.progress)
-            if "stage" in d:
-                st.stage = d["stage"]
-            if "feasibility_score" in d:
-                st.feasibility_score = safe_int(d["feasibility_score"], st.feasibility_score)
-            db.session.commit()
+        st_id = d.get("id")
+        if st_id:
+            st = db.session.get(StartupIdea, int(st_id))
+            if st:
+                if "progress" in d and d["progress"] is not None:
+                    st.progress = int(d["progress"])
+                if "stage" in d:
+                    st.stage = d["stage"]
+                if "feasibility_score" in d and d["feasibility_score"] is not None:
+                    st.feasibility_score = int(d["feasibility_score"])
+                db.session.commit()
         return jsonify({"status": "updated"})
 
     st = StartupIdea(
-        name=d.get("name") or "Untitled Venture",
+        name=d.get("name") or "New Venture",
         description=d.get("description") or "",
         market=d.get("market") or "India / Global",
         industry=d.get("industry") or "SaaS / Tech",
@@ -353,8 +376,8 @@ def manage_startups():
         market_size=d.get("market_size") or "₹10Cr TAM",
         stage=d.get("stage") or "Idea",
         priority=d.get("priority") or "High",
-        feasibility_score=safe_int(d.get("feasibility_score"), 85),
-        progress=safe_int(d.get("progress"), 10)
+        feasibility_score=int(d.get("feasibility_score") or 85),
+        progress=int(d.get("progress") or 10)
     )
     db.session.add(st)
     db.session.commit()
@@ -363,10 +386,12 @@ def manage_startups():
 @app.route("/api/tasks", methods=["POST", "PUT", "DELETE"])
 def handle_tasks():
     if request.method == "DELETE":
-        t = db.session.get(ProjectTask, safe_int(request.args.get("id")))
-        if t:
-            db.session.delete(t)
-            db.session.commit()
+        t_id = request.args.get("id")
+        if t_id:
+            t = db.session.get(ProjectTask, int(t_id))
+            if t:
+                db.session.delete(t)
+                db.session.commit()
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
@@ -385,27 +410,31 @@ def handle_tasks():
         db.session.commit()
         return jsonify({"status": "success", "id": t.id})
     else:
-        t = db.session.get(ProjectTask, safe_int(d.get("id")))
-        if t:
-            t.kanban_stage = d.get("kanban_stage", t.kanban_stage)
-            t.status = "Completed" if t.kanban_stage == "Completed" else "In Progress"
-            db.session.commit()
+        t_id = d.get("id")
+        if t_id:
+            t = db.session.get(ProjectTask, int(t_id))
+            if t:
+                t.kanban_stage = d.get("kanban_stage", t.kanban_stage)
+                t.status = "Completed" if t.kanban_stage == "Completed" else "In Progress"
+                db.session.commit()
         return jsonify({"status": "updated"})
 
 @app.route("/api/journals", methods=["POST", "DELETE"])
 def create_journal():
     if request.method == "DELETE":
-        j = db.session.get(JournalEntry, safe_int(request.args.get("id")))
-        if j:
-            db.session.delete(j)
-            db.session.commit()
+        j_id = request.args.get("id")
+        if j_id:
+            j = db.session.get(JournalEntry, int(j_id))
+            if j:
+                db.session.delete(j)
+                db.session.commit()
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
     j = JournalEntry(
         entry_type=d.get("entry_type") or "Founder Journal",
         category_tag=d.get("category_tag") or "Daily Work",
-        title=d.get("title") or "Untitled Entry",
+        title=d.get("title") or "Untitled Log",
         details=d.get("details") or "",
         expected_outcome=d.get("expected_outcome") or "",
         actual_result=d.get("actual_result") or ""
@@ -427,19 +456,13 @@ def export_json():
 def export_csv():
     rows = ["ID,Startup Name,Stage,Industry,Revenue Model,Market Size,Feasibility Score,Progress"]
     for s in StartupIdea.query.all():
-        safe_name = (s.name or "").replace('"', '""')
-        safe_model = (s.revenue_model or "").replace('"', '""')
-        safe_market = (s.market_size or "").replace('"', '""')
-        rows.append(f'{s.id},"{safe_name}","{s.stage}","{s.industry}","{safe_model}","{safe_market}",{s.feasibility_score},{s.progress}')
+        rows.append(f'{s.id},"{s.name}","{s.stage}","{s.industry}","{s.revenue_model}","{s.market_size}",{s.feasibility_score},{s.progress}')
     return Response(
         "\n".join(rows),
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment;filename=bigknowledge_startups.csv"}
     )
 
-# ==============================================================================
-# 🤖 SUPER AI CO-FOUNDER ROUTE (WITH VALID GROQ MODEL & AUTOMATIC FALLBACK)
-# ==============================================================================
 @app.route("/api/ai-assistant", methods=["POST"])
 def ai_assistant():
     d = request.get_json(silent=True) or {}
@@ -449,66 +472,49 @@ def ai_assistant():
 
     if not groq_client:
         return jsonify({
-            "reply": "Vijay bhai, Render environment variables me GROQ_API_KEY set nahi hai. Kripya Render Dashboard -> Environment me GROQ_API_KEY add karein.",
+            "reply": f"Vijay bhai, abhi Render par GROQ_API_KEY set nahi hai, par maine aapki query '{user_query}' note kar li hai.",
             "action": "CHAT",
             "data": {"target": "dashboard"}
-        }), 200
+        })
 
     system_prompt = """
     You are SUPER AI, the core assistant for Mr. Vijay Mistry's 'BigKnowledge' Founder OS.
     Your job is to understand what Vijay wants and return a STRICT JSON response.
     
-    Website Map (Pages & What They Contain):
-    1. "NAVIGATE": Use this action to open a page based on what Vijay is looking for.
-       Pages available:
-       - 'code-vault': Opens Developer Code & API Vault. Use this if Vijay asks for code, scripts, terminal commands, Python, or "git add .".
-       - 'finance-ledger': Opens Finance & Cashflow. Use this for money, revenue, expenses, or burn tracker.
-       - 'video-vault': Opens Video Vault. Use this for YouTube links, video notes.
-       - 'kanban-board': Opens Kanban. Use this for execution, tasks, building, sprints.
-       - 'startup-db': Opens Startup Ideas Database.
-       - 'problem-center': Opens Problem Collection Center.
-       - 'knowledge-vault': Opens Knowledge Vault for general text notes and research.
-       - 'journals': Opens Founder Journals and logs.
-       - 'dashboard': Opens Main Dashboard.
-       
-    2. "ADD_TASK": Use when Vijay explicitly says to add a new task.
-    3. "SEARCH": Use when Vijay wants to search his past ideas in the database.
-    4. "CHAT": Use for normal talk, coding help, or business advice.
+    Website Map:
+    1. "NAVIGATE": 'code-vault', 'finance-ledger', 'video-vault', 'kanban-board', 'startup-db', 'problem-center', 'knowledge-vault', 'journals', 'dashboard'
+    2. "ADD_TASK": When Vijay asks to add a task.
+    3. "SEARCH": When Vijay searches past ideas.
+    4. "CHAT": Normal talk, coding help, or business advice.
 
-    You MUST reply ONLY in this JSON format without any markdown or extra text:
+    Reply ONLY in this JSON format:
     {
-      "reply": "Your natural Hinglish reply (e.g., 'Vijay bhai, maine Code Vault open kar diya hai jahan aapke git commands hain.')",
+      "reply": "Your natural Hinglish reply",
       "action": "ACTION_NAME",
-      "data": { "target": "page-name-from-the-list-above" }
+      "data": { "target": "page-name" }
     }
     """
 
-    models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-    last_error = None
-
-    for model_name in models_to_try:
-        try:
-            chat_completion = groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
-                model=model_name,
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-            ai_response_text = chat_completion.choices[0].message.content
-            ai_json = json.loads(ai_response_text)
-            return jsonify(ai_json)
-        except Exception as e:
-            last_error = str(e)
-            continue
-
-    return jsonify({
-        "reply": f"Sorry Vijay bhai, Groq AI model call me error aaya: {last_error}",
-        "action": "ERROR",
-        "data": {"error_details": last_error}
-    }), 500
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        ai_response_text = chat_completion.choices[0].message.content
+        ai_json = json.loads(ai_response_text)
+        return jsonify(ai_json)
+    except Exception as e:
+        print("🚨 GROQ ERROR:", str(e))
+        return jsonify({
+            "reply": f"Vijay bhai, AI engine me temporary issue aaya ({str(e)[:60]}), par aapka Dashboard ready hai.",
+            "action": "CHAT",
+            "data": {"target": "dashboard"}
+        }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

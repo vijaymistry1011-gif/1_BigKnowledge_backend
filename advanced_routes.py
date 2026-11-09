@@ -55,8 +55,8 @@ DEFAULT_STORE_DATA = {
     }
 }
 
-def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stream", sub_folder="Media_Vault"):
-    """Helper function: Uploads any file bytes directly to 5TB Google Drive via Apps Script Bridge."""
+def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stream", sub_folder="Uploaded_Files"):
+    """Uploads file directly to 5TB Google Drive using GDRIVE_WEBHOOK_URL from .env"""
     webhook_url = os.environ.get("GDRIVE_WEBHOOK_URL")
     if not webhook_url:
         return None
@@ -72,6 +72,10 @@ def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stre
         if response.status_code == 200:
             res_json = response.json()
             if res_json.get("status") == "success":
+                file_id = res_json.get("file_id")
+                # Image ke liye direct thumbnail CDN link taaki website par 100% photo dikhe
+                if file_id and mime_type.startswith("image/"):
+                    return f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
                 return res_json.get("url")
     except Exception as e:
         print("🚨 5TB Google Drive Upload Error:", str(e))
@@ -92,7 +96,7 @@ def save_custom_store(data):
     with open(CUSTOM_STORE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# 1. File Upload API -> Priority 1: 5TB Google Drive | Priority 2: Cloudinary | Priority 3: Local Render
+# 1. File Upload API -> Sends to 5TB Drive + Saves in Knowledge Vault Database
 @adv_bp.route("/api/adv/upload_file", methods=["POST"])
 def upload_real_file():
     if "file" not in request.files:
@@ -105,41 +109,34 @@ def upload_real_file():
     mime_type = f.mimetype or "application/octet-stream"
     file_bytes = f.read()
 
-    # PRIORITY 1: Upload to 5TB Google Drive
-    gdrive_url = upload_to_5tb_gdrive(file_bytes, safe_name, mime_type, sub_folder="Uploaded_Files")
-    if gdrive_url:
-        return jsonify({
-            "status": "success",
-            "url": gdrive_url,
-            "filename": f.filename,
-            "storage_engine": "5TB_Google_Drive"
-        })
+    # Step A: Upload to 5TB Google Drive
+    file_url = upload_to_5tb_gdrive(file_bytes, safe_name, mime_type, sub_folder="Uploaded_Files")
+    storage_used = "5TB_Google_Drive"
 
-    # PRIORITY 2: Upload to Cloudinary if configured
-    if os.environ.get("CLOUDINARY_URL"):
+    # Step B: Fallback to Cloudinary if Drive URL not set
+    if not file_url and os.environ.get("CLOUDINARY_URL"):
         try:
             f.seek(0)
             res = cloudinary.uploader.upload(f, resource_type="auto")
-            return jsonify({
-                "status": "success",
-                "url": res.get("secure_url"),
-                "filename": f.filename,
-                "storage_engine": "Cloudinary"
-            })
+            file_url = res.get("secure_url")
+            storage_used = "Cloudinary"
         except Exception as e:
-            print("Cloudinary fallback to local:", e)
+            print("Cloudinary error:", e)
 
-    # PRIORITY 3: Local Render Static Folder Fallback
-    save_path = os.path.join(UPLOAD_DIR, safe_name)
-    with open(save_path, "wb") as out_file:
-        out_file.write(file_bytes)
-    base_url = request.host_url.rstrip("/")
-    file_url = f"{base_url}/static/uploads/{safe_name}"
+    # Step C: Fallback to Local Render Disk
+    if not file_url:
+        save_path = os.path.join(UPLOAD_DIR, safe_name)
+        with open(save_path, "wb") as out_file:
+            out_file.write(file_bytes)
+        base_url = request.host_url.rstrip("/")
+        file_url = f"{base_url}/static/uploads/{safe_name}"
+        storage_used = "Local_Disk"
+
     return jsonify({
         "status": "success",
         "url": file_url,
         "filename": f.filename,
-        "storage_engine": "Local_Disk"
+        "storage_engine": storage_used
     })
 
 # 2. Universal Delete API
