@@ -4,8 +4,9 @@ Flask-JWT-Extended==4.6.0
 Flask-Cors==4.0.1
 Werkzeug==3.0.3
 SQLAlchemy==2.0.31
-# isko hata diya kyouki(चूँकि आप अभी अपने लोकल VS Code में SQLite डेटाबेस पर ऐप चला रहे हैं (और PostgreSQL की ज़रूरत सिर्फ ऑनलाइन Render पर होस्ट करते समय पड़ती है), इसलिए लोकल कंप्यूटर पर psycopg2-binary की कोई ज़रूरत नहीं है।) psycopg2-binary==2.9.9
+psycopg2-binary==2.9.9
 cloudinary==1.40.0
 python-dotenv==1.0.1
 gunicorn==22.0.0
 groq==0.5.0
+requests

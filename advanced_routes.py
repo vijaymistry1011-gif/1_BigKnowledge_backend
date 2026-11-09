@@ -1,11 +1,13 @@
 import os
 import json
+import base64
+import requests
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from flask import Blueprint, request, jsonify
 import cloudinary.uploader
 from models import (
-    db, KeyValueStore, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
+    db, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
     InnovationItem, StartupIdea, ProjectTask, RoadmapMilestone,
     JournalEntry, GoalHabit, OrganizationCRM
 )
@@ -15,72 +17,82 @@ adv_bp = Blueprint("adv_bp", __name__)
 UPLOAD_DIR = os.path.join(os.getcwd(), "static", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-STORE_KEY = "interactive_store"
+CUSTOM_STORE_FILE = os.path.join(UPLOAD_DIR, "interactive_store.json")
 
-def safe_int(val, default=0):
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
-
-def get_default_store():
-    return {
-        "graph_nodes": [
-            {"id": 1, "label": "Problem: Local Catalogs", "group": "Problem", "x": 180, "y": 220, "color": "#F59E0B"},
-            {"id": 2, "label": "Solution: 1-Click SaaS", "group": "Solution", "x": 450, "y": 150, "color": "#0EA5E9"},
-            {"id": 3, "label": "Startup: B2Conecter", "group": "Startup", "x": 750, "y": 220, "color": "#7C3AED"},
-            {"id": 4, "label": "Revenue: Tiered Plan", "group": "Revenue", "x": 1000, "y": 220, "color": "#10B981"}
-        ],
-        "graph_links": [[1, 2], [2, 3], [3, 4]],
-        "mindmap_nodes": [
-            {"id": 101, "label": "BIGKNOWLEDGE BRAIN", "parent": 0, "x": 550, "y": 240, "color": "#7C3AED", "img": ""},
-            {"id": 102, "label": "Startup Ideas", "parent": 101, "x": 250, "y": 120, "color": "#0EA5E9", "img": ""},
-            {"id": 103, "label": "Research & Vault", "parent": 101, "x": 850, "y": 120, "color": "#10B981", "img": ""},
-            {"id": 104, "label": "Execution & Team", "parent": 101, "x": 550, "y": 400, "color": "#F59E0B", "img": ""}
-        ],
-        "bmc": {
-            "partners": "Cloud Providers, Incubators, Local Merchant Guilds",
-            "activities": "Full-Stack Product Engineering, Problem Validation",
-            "value": "Lifelong Second Brain + Startup Execution OS",
-            "relationships": "Self-serve SaaS, Community & Automated Reports",
-            "segments": "Startup Founders, Researchers, SMB Owners",
-            "resources": "Knowledge Graph Engine, PostgreSQL Vault",
-            "channels": "Direct SaaS Onboarding, Hackathons, Communities",
-            "costs": "Cloud Hosting, Database Compute, Storage CDN",
-            "revenue": "Tiered Subscriptions (₹199 / ₹299 / ₹399 / ₹799)"
-        },
-        "active_workspace": {
-            "startup_name": "B2Conecter & BIGKNOWLEDGE OS",
-            "goal": "Onboard 100 Active Users & Complete Cloud Persistence",
-            "problem": "Fragmented tools for founders & local businesses",
-            "solution": "Unified Founder OS + Hyperlocal Storefront Engine",
-            "milestones": "Database Ready, UI Ready, Media Vaults Active",
-            "progress": 82,
-            "hours": 350
-        }
+DEFAULT_STORE_DATA = {
+    "graph_nodes": [
+        {"id": 1, "label": "Problem: Local Catalogs", "group": "Problem", "x": 180, "y": 220, "color": "#F59E0B"},
+        {"id": 2, "label": "Solution: 1-Click SaaS", "group": "Solution", "x": 450, "y": 150, "color": "#0EA5E9"},
+        {"id": 3, "label": "Startup: B2Conecter", "group": "Startup", "x": 750, "y": 220, "color": "#7C3AED"},
+        {"id": 4, "label": "Revenue: Tiered Plan", "group": "Revenue", "x": 1000, "y": 220, "color": "#10B981"}
+    ],
+    "graph_links": [[1, 2], [2, 3], [3, 4]],
+    "mindmap_nodes": [
+        {"id": 101, "label": "BIGKNOWLEDGE BRAIN", "parent": 0, "x": 550, "y": 240, "color": "#7C3AED", "img": ""},
+        {"id": 102, "label": "Startup Ideas", "parent": 101, "x": 250, "y": 120, "color": "#0EA5E9", "img": ""},
+        {"id": 103, "label": "Research & Vault", "parent": 101, "x": 850, "y": 120, "color": "#10B981", "img": ""},
+        {"id": 104, "label": "Execution & Team", "parent": 101, "x": 550, "y": 400, "color": "#F59E0B", "img": ""}
+    ],
+    "bmc": {
+        "partners": "Cloud Providers, Incubators, Local Merchant Guilds",
+        "activities": "Full-Stack Product Engineering, Problem Validation",
+        "value": "Lifelong Second Brain + Startup Execution OS",
+        "relationships": "Self-serve SaaS, Community & Automated Reports",
+        "segments": "Startup Founders, Researchers, SMB Owners",
+        "resources": "Knowledge Graph Engine, 5TB Google Drive Vault",
+        "channels": "Direct SaaS Onboarding, Hackathons, Communities",
+        "costs": "Cloud Hosting, Database Compute, Storage CDN",
+        "revenue": "Tiered Subscriptions (₹199 / ₹299 / ₹399 / ₹799)"
+    },
+    "active_workspace": {
+        "startup_name": "B2Conecter & BIGKNOWLEDGE OS",
+        "goal": "Onboard 100 Active Users & Complete Cloud Persistence",
+        "problem": "Fragmented tools for founders & local businesses",
+        "solution": "Unified Founder OS + Hyperlocal Storefront Engine",
+        "milestones": "Database Ready, UI Ready, 5TB Drive Vault Active",
+        "progress": 85,
+        "hours": 350
     }
+}
+
+def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stream", sub_folder="Media_Vault"):
+    """Helper function: Uploads any file bytes directly to 5TB Google Drive via Apps Script Bridge."""
+    webhook_url = os.environ.get("GDRIVE_WEBHOOK_URL")
+    if not webhook_url:
+        return None
+    try:
+        b64_data = base64.b64encode(file_bytes).decode("utf-8")
+        payload = {
+            "filename": filename,
+            "mime_type": mime_type,
+            "file_base64": b64_data,
+            "sub_folder": sub_folder
+        }
+        response = requests.post(webhook_url, json=payload, timeout=45)
+        if response.status_code == 200:
+            res_json = response.json()
+            if res_json.get("status") == "success":
+                return res_json.get("url")
+    except Exception as e:
+        print("🚨 5TB Google Drive Upload Error:", str(e))
+    return None
 
 def load_custom_store():
-    record = KeyValueStore.query.get(STORE_KEY)
-    if not record:
-        default_data = get_default_store()
-        save_custom_store(default_data)
-        return default_data
+    if not os.path.exists(CUSTOM_STORE_FILE):
+        save_custom_store(DEFAULT_STORE_DATA)
+        return dict(DEFAULT_STORE_DATA)
     try:
-        return json.loads(record.value_json)
+        with open(CUSTOM_STORE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return get_default_store()
+        save_custom_store(DEFAULT_STORE_DATA)
+        return dict(DEFAULT_STORE_DATA)
 
 def save_custom_store(data):
-    record = KeyValueStore.query.get(STORE_KEY)
-    if not record:
-        record = KeyValueStore(key=STORE_KEY, value_json=json.dumps(data))
-        db.session.add(record)
-    else:
-        record.value_json = json.dumps(data)
-    db.session.commit()
+    with open(CUSTOM_STORE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-# 1. File Upload API (Cloudinary first, Full Render URL fallback)
+# 1. File Upload API -> Priority 1: 5TB Google Drive | Priority 2: Cloudinary | Priority 3: Local Render
 @adv_bp.route("/api/adv/upload_file", methods=["POST"])
 def upload_real_file():
     if "file" not in request.files:
@@ -89,25 +101,46 @@ def upload_real_file():
     if not f or f.filename == "":
         return jsonify({"error": "Empty filename"}), 400
 
-    # Try Cloudinary if configured in environment
+    safe_name = f"{int(datetime.utcnow().timestamp())}_{secure_filename(f.filename)}"
+    mime_type = f.mimetype or "application/octet-stream"
+    file_bytes = f.read()
+
+    # PRIORITY 1: Upload to 5TB Google Drive
+    gdrive_url = upload_to_5tb_gdrive(file_bytes, safe_name, mime_type, sub_folder="Uploaded_Files")
+    if gdrive_url:
+        return jsonify({
+            "status": "success",
+            "url": gdrive_url,
+            "filename": f.filename,
+            "storage_engine": "5TB_Google_Drive"
+        })
+
+    # PRIORITY 2: Upload to Cloudinary if configured
     if os.environ.get("CLOUDINARY_URL"):
         try:
-            upload_res = cloudinary.uploader.upload(f, resource_type="auto")
+            f.seek(0)
+            res = cloudinary.uploader.upload(f, resource_type="auto")
             return jsonify({
                 "status": "success",
-                "url": upload_res.get("secure_url"),
-                "filename": f.filename
+                "url": res.get("secure_url"),
+                "filename": f.filename,
+                "storage_engine": "Cloudinary"
             })
         except Exception as e:
-            print("Cloudinary upload fallback to local:", e)
-            f.seek(0)
+            print("Cloudinary fallback to local:", e)
 
-    safe_name = f"{int(datetime.utcnow().timestamp())}_{secure_filename(f.filename)}"
+    # PRIORITY 3: Local Render Static Folder Fallback
     save_path = os.path.join(UPLOAD_DIR, safe_name)
-    f.save(save_path)
+    with open(save_path, "wb") as out_file:
+        out_file.write(file_bytes)
     base_url = request.host_url.rstrip("/")
     file_url = f"{base_url}/static/uploads/{safe_name}"
-    return jsonify({"status": "success", "url": file_url, "filename": f.filename})
+    return jsonify({
+        "status": "success",
+        "url": file_url,
+        "filename": f.filename,
+        "storage_engine": "Local_Disk"
+    })
 
 # 2. Universal Delete API
 @adv_bp.route("/api/adv/delete", methods=["POST"])
@@ -127,8 +160,9 @@ def universal_delete():
         "crm": OrganizationCRM
     }
     model = model_map.get(d.get("module"))
-    if model and d.get("id") is not None:
-        obj = db.session.get(model, safe_int(d.get("id")))
+    rec_id = d.get("id")
+    if model and rec_id is not None:
+        obj = db.session.get(model, int(rec_id))
         if obj:
             db.session.delete(obj)
             db.session.commit()
@@ -140,65 +174,74 @@ def universal_delete():
 def universal_create():
     d = request.get_json(silent=True) or {}
     mod = d.get("module")
-    item = None
 
     if mod == "solution":
         item = SolutionItem(
-            problem_title=d.get("problem_title", "General Problem"),
-            solution_title=d.get("solution_title") or d.get("title", "New Solution"),
-            cost_estimate=d.get("cost_estimate", "$1,000"),
-            benefits=d.get("benefits", ""),
-            market_impact=d.get("market_impact", "High"),
-            difficulty=d.get("difficulty", "Medium"),
-            revenue_potential=d.get("revenue_potential", "High")
+            problem_title=d.get("problem_title") or "General Problem",
+            solution_title=d.get("solution_title") or "Proposed Solution",
+            cost_estimate=d.get("cost_estimate") or "$1,000",
+            benefits=d.get("benefits") or "",
+            market_impact=d.get("market_impact") or "High",
+            difficulty=d.get("difficulty") or "Medium",
+            revenue_potential=d.get("revenue_potential") or "High"
         )
+        db.session.add(item)
+
     elif mod == "innovation":
         item = InnovationItem(
-            title=d.get("title", "Untitled Innovation"),
-            category=d.get("category", "Technology"),
-            summary=d.get("summary", ""),
-            opportunity_note=d.get("opportunity_note", "")
+            title=d.get("title") or "New Innovation",
+            category=d.get("category") or "Technology",
+            summary=d.get("summary") or "",
+            opportunity_note=d.get("opportunity_note") or ""
         )
+        db.session.add(item)
+
     elif mod == "roadmap":
         item = RoadmapMilestone(
-            roadmap_type=d.get("roadmap_type", "Startup Roadmap"),
-            title=d.get("title", "New Milestone"),
-            dependencies=d.get("dependencies", "None"),
-            deadline=d.get("deadline", "2026-12-31"),
-            progress=safe_int(d.get("progress"), 50)
+            roadmap_type=d.get("roadmap_type") or "Startup Roadmap",
+            title=d.get("title") or "Milestone",
+            dependencies=d.get("dependencies") or "None",
+            deadline=d.get("deadline") or "2026-12-31",
+            progress=int(d.get("progress") or 50)
         )
+        db.session.add(item)
+
     elif mod == "goal":
         item = GoalHabit(
-            item_type=d.get("item_type", "Goal"),
-            title=d.get("title", "New Goal"),
-            streak_or_progress=safe_int(d.get("streak_or_progress"), 1),
-            completed_today=bool(d.get("completed_today", True))
+            item_type=d.get("item_type") or "Goal",
+            title=d.get("title") or "Daily Goal",
+            streak_or_progress=int(d.get("streak_or_progress") or 1),
+            completed_today=True
         )
+        db.session.add(item)
+
     elif mod == "crm":
         item = OrganizationCRM(
-            entity_type=d.get("entity_type", "Team Member"),
-            name=d.get("name") or d.get("title", "New Contact"),
-            role_or_segment=d.get("role_or_segment", "Developer"),
-            department_or_company=d.get("department_or_company", "Core Team"),
-            details_or_strengths=d.get("details_or_strengths", ""),
-            weaknesses_or_actions=d.get("weaknesses_or_actions", ""),
-            tasks_completed=safe_int(d.get("tasks_completed"), 10),
-            tasks_pending=safe_int(d.get("tasks_pending"), 2),
-            work_hours=safe_int(d.get("work_hours"), 40),
-            productivity_score=safe_int(d.get("productivity_score"), 95)
+            entity_type=d.get("entity_type") or "Team Member",
+            name=d.get("name") or "Member",
+            role_or_segment=d.get("role_or_segment") or "Developer",
+            department_or_company=d.get("department_or_company") or "Core Team",
+            details_or_strengths=d.get("details_or_strengths") or "",
+            weaknesses_or_actions=d.get("weaknesses_or_actions") or "",
+            tasks_completed=int(d.get("tasks_completed") or 10),
+            tasks_pending=int(d.get("tasks_pending") or 2),
+            work_hours=int(d.get("work_hours") or 40),
+            productivity_score=int(d.get("productivity_score") or 95)
         )
+        db.session.add(item)
+
     elif mod == "reference":
         item = ReferenceDesign(
-            title=d.get("title", "UI Reference"),
-            ref_type=d.get("ref_type", "Dashboard Reference"),
-            image_url=d.get("image_url", ""),
-            extracted_palette=d.get("extracted_palette", "#7C3AED, #0EA5E9, #10B981"),
-            notes=d.get("notes", "")
+            title=d.get("title") or "UI Reference",
+            ref_type=d.get("ref_type") or "Dashboard Reference",
+            image_url=d.get("image_url") or "",
+            extracted_palette=d.get("extracted_palette") or "#7C3AED, #0EA5E9, #10B981",
+            notes=d.get("notes") or ""
         )
+        db.session.add(item)
     else:
         return jsonify({"error": f"Unknown module: {mod}"}), 400
 
-    db.session.add(item)
     db.session.commit()
     return jsonify({"status": "created", "id": item.id})
 

@@ -3,23 +3,16 @@ import json
 import base64
 from datetime import datetime
 from flask import Blueprint, request, jsonify
-import cloudinary.uploader
 from models import (
     db, KnowledgeItem, Problem, SolutionItem,
-    InnovationItem, StartupIdea, ProjectTask,
-    RoadmapMilestone, JournalEntry, GoalHabit, OrganizationCRM
+    StartupIdea, ProjectTask, JournalEntry
 )
+from advanced_routes import upload_to_5tb_gdrive
 
 power_bp = Blueprint("power_bp", __name__)
 
 UPLOAD_DIR = os.path.join(os.getcwd(), "static", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-def safe_int(val, default=0):
-    try:
-        return int(val)
-    except (ValueError, TypeError):
-        return default
 
 # 1. AI Co-Founder Smart Analyzer & Pitch Deck Generator API
 @power_bp.route("/api/power/ai_cofounder", methods=["POST"])
@@ -64,61 +57,58 @@ def ai_cofounder_engine():
 
     return jsonify({"status": "success", "reply": reply})
 
-# 2. Save Whiteboard Sketch directly to Image Vault as HD PNG
+# 2. Save Whiteboard Sketch directly to 5TB Google Drive & Image Vault
 @power_bp.route("/api/power/save_sketch", methods=["POST"])
 def save_whiteboard_sketch():
     d = request.get_json(silent=True) or {}
     img_data = d.get("image_base64", "")
     title = d.get("title") or f"Architecture Sketch {datetime.now().strftime('%H:%M')}"
-
     if not img_data:
-        return jsonify({"error": "No image data provided"}), 400
+        return jsonify({"error": "No image data"}), 400
 
-    file_url = ""
-    # Upload directly to Cloudinary if configured
-    if os.environ.get("CLOUDINARY_URL"):
-        try:
-            upload_str = img_data if img_data.startswith("data:") else f"data:image/png;base64,{img_data}"
-            res = cloudinary.uploader.upload(upload_str, folder="bigknowledge_sketches")
-            file_url = res.get("secure_url", "")
-        except Exception as e:
-            print("Sketch Cloudinary fallback to local:", e)
+    if "," in img_data:
+        img_data = img_data.split(",")[1]
 
+    img_bytes = base64.b64decode(img_data)
+    filename = f"sketch_{int(datetime.utcnow().timestamp())}.png"
+
+    # Try uploading directly to 5TB Google Drive first
+    file_url = upload_to_5tb_gdrive(img_bytes, filename, "image/png", sub_folder="Whiteboard_Sketches")
+
+    # Fallback to local disk if webhook not configured
     if not file_url:
-        raw_b64 = img_data.split(",")[1] if "," in img_data else img_data
-        filename = f"sketch_{int(datetime.utcnow().timestamp())}.png"
         filepath = os.path.join(UPLOAD_DIR, filename)
         with open(filepath, "wb") as f:
-            f.write(base64.b64decode(raw_b64))
+            f.write(img_bytes)
         base_url = request.host_url.rstrip("/")
         file_url = f"{base_url}/static/uploads/{filename}"
 
     item = KnowledgeItem(
         title=title,
         category="Image",
-        content="Created in Interactive Architecture Whiteboard Sketchpad",
+        content="Created in Interactive Architecture Whiteboard Sketchpad (Stored in 5TB Vault)",
         media_url=file_url,
-        tags="whiteboard,architecture,diagram"
+        tags="whiteboard,architecture,diagram,5tb-drive"
     )
     db.session.add(item)
     db.session.commit()
     return jsonify({"status": "saved", "url": file_url, "id": item.id})
 
-# 3. Full JSON Backup Restore Engine (Restores all modules)
+# 3. Full JSON Backup Restore Engine (1-Click Restore)
 @power_bp.route("/api/power/restore_backup", methods=["POST"])
 def restore_full_backup():
-    if "file" in request.files:
-        f = request.files["file"]
+    if "file" not in request.files:
+        return jsonify({"error": "No backup file provided"}), 400
+    f = request.files["file"]
+    try:
         data = json.load(f)
-    elif request.is_json:
-        data = request.get_json(silent=True) or {}
-    else:
-        return jsonify({"error": "No backup file or JSON provided"}), 400
+    except Exception:
+        return jsonify({"error": "Invalid JSON file"}), 400
 
     restored_count = 0
 
     for k in data.get("knowledge", []):
-        if k.get("title") and not KnowledgeItem.query.filter_by(title=k.get("title")).first():
+        if not KnowledgeItem.query.filter_by(title=k.get("title")).first():
             db.session.add(KnowledgeItem(
                 title=k.get("title", "Restored Note"),
                 category=k.get("category", "Note"),
@@ -128,42 +118,15 @@ def restore_full_backup():
             ))
             restored_count += 1
 
-    for p in data.get("problems", []):
-        if p.get("title") and not Problem.query.filter_by(title=p.get("title")).first():
-            db.session.add(Problem(
-                title=p.get("title"),
-                source=p.get("source", "Restored"),
-                root_cause=p.get("root_cause", ""),
-                proposed_solution=p.get("solution", ""),
-                market_demand=safe_int(p.get("market_demand"), 8),
-                revenue_potential=p.get("revenue_potential", "₹10L - ₹1Cr"),
-                opportunity_score=safe_int(p.get("opportunity_score"), 80)
-            ))
-            restored_count += 1
-
     for st in data.get("startups", []):
-        if st.get("name") and not StartupIdea.query.filter_by(name=st.get("name")).first():
+        if not StartupIdea.query.filter_by(name=st.get("name")).first():
             db.session.add(StartupIdea(
                 name=st.get("name", "Restored Startup"),
                 description=st.get("description", ""),
                 revenue_model=st.get("revenue_model", "Subscription"),
-                market_size=st.get("market_size", "₹10Cr TAM"),
                 stage=st.get("stage", "MVP"),
-                feasibility_score=safe_int(st.get("feasibility_score"), 85),
-                progress=safe_int(st.get("progress"), 50)
-            ))
-            restored_count += 1
-
-    for t in data.get("tasks", []):
-        if t.get("title") and not ProjectTask.query.filter_by(title=t.get("title")).first():
-            db.session.add(ProjectTask(
-                title=t.get("title"),
-                project_name=t.get("project_name", "Main Startup"),
-                kanban_stage=t.get("kanban_stage", "Ideas"),
-                priority=t.get("priority", "High"),
-                deadline=t.get("deadline", "2026-12-31"),
-                dependencies=t.get("dependencies", "None"),
-                assignee=t.get("assignee", "Mr. Vijay Mistry")
+                feasibility_score=int(st.get("feasibility_score", 85)),
+                progress=int(st.get("progress", 50))
             ))
             restored_count += 1
 
