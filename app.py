@@ -80,22 +80,18 @@ with app.app_context():
 
 @app.route("/")
 def dashboard_home():
-    try:
-        return render_template("index.html")
-    except Exception:
-        return jsonify({
-            "status": "live",
-            "service": "BigKnowledge Backend API",
-            "founder": "Mr. Vijay Mistry",
-            "gdrive_5tb_connected": bool(os.environ.get("GDRIVE_WEBHOOK_URL"))
-        })
+    return jsonify({
+        "status": "live",
+        "service": "BigKnowledge Backend API",
+        "founder": "Mr. Vijay Mistry",
+        "gdrive_5tb_connected": bool(os.environ.get("GDRIVE_WEBHOOK_URL")),
+        "endpoints_active": ["core", "adv_bp", "chat_bp", "power_bp"]
+    })
 
 @app.route("/login")
 def login_page():
-    try:
-        return render_template("login.html")
-    except Exception:
-        return jsonify({"status": "login_endpoint_active"})
+    return jsonify({"status": "login_endpoint_active"})
+
 
 @app.route("/static/uploads/<path:filename>")
 def serve_uploads(filename):
