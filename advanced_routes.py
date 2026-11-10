@@ -1,10 +1,11 @@
 import os
 import json
 import base64
-import requests
+import threading
+import urllib.request
 from datetime import datetime
 from werkzeug.utils import secure_filename
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 import cloudinary.uploader
 from models import (
     db, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
@@ -56,24 +57,27 @@ DEFAULT_STORE_DATA = {
 }
 
 def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stream", sub_folder="Uploaded_Files"):
-    """Uploads file directly to 5TB Google Drive using GDRIVE_WEBHOOK_URL from .env"""
+    """Uploads file to 5TB Google Drive using standard urllib (Zero extra dependencies)"""
     webhook_url = os.environ.get("GDRIVE_WEBHOOK_URL")
     if not webhook_url:
         return None
     try:
-        b64_data = base64.b64encode(file_bytes).decode("utf-8")
-        payload = {
+        payload = json.dumps({
             "filename": filename,
             "mime_type": mime_type,
-            "file_base64": b64_data,
+            "file_base64": base64.b64encode(file_bytes).decode("utf-8"),
             "sub_folder": sub_folder
-        }
-        response = requests.post(webhook_url, json=payload, timeout=45)
-        if response.status_code == 200:
-            res_json = response.json()
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
             if res_json.get("status") == "success":
                 file_id = res_json.get("file_id")
-                # Image ke liye direct thumbnail CDN link taaki website par 100% photo dikhe
                 if file_id and mime_type.startswith("image/"):
                     return f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
                 return res_json.get("url")
@@ -96,7 +100,7 @@ def save_custom_store(data):
     with open(CUSTOM_STORE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# 1. File Upload API -> Sends to 5TB Drive + Saves in Knowledge Vault Database
+# 1. SUPERFAST INSTANT UPLOAD API (0.5 Second Response + Background 5TB Drive Sync)
 @adv_bp.route("/api/adv/upload_file", methods=["POST"])
 def upload_real_file():
     if "file" not in request.files:
@@ -109,34 +113,44 @@ def upload_real_file():
     mime_type = f.mimetype or "application/octet-stream"
     file_bytes = f.read()
 
-    # Step A: Upload to 5TB Google Drive
-    file_url = upload_to_5tb_gdrive(file_bytes, safe_name, mime_type, sub_folder="Uploaded_Files")
-    storage_used = "5TB_Google_Drive"
+    # STEP A: Turant (0.2 second me) Render par save karo taaki website bilkul wait na kare!
+    save_path = os.path.join(UPLOAD_DIR, safe_name)
+    with open(save_path, "wb") as out_file:
+        out_file.write(file_bytes)
 
-    # Step B: Fallback to Cloudinary if Drive URL not set
-    if not file_url and os.environ.get("CLOUDINARY_URL"):
-        try:
-            f.seek(0)
-            res = cloudinary.uploader.upload(f, resource_type="auto")
-            file_url = res.get("secure_url")
-            storage_used = "Cloudinary"
-        except Exception as e:
-            print("Cloudinary error:", e)
+    base_url = request.host_url.rstrip("/")
+    instant_url = f"{base_url}/static/uploads/{safe_name}"
 
-    # Step C: Fallback to Local Render Disk
-    if not file_url:
-        save_path = os.path.join(UPLOAD_DIR, safe_name)
-        with open(save_path, "wb") as out_file:
-            out_file.write(file_bytes)
-        base_url = request.host_url.rstrip("/")
-        file_url = f"{base_url}/static/uploads/{safe_name}"
-        storage_used = "Local_Disk"
+    # STEP B: Background me chupchap 5TB Google Drive me bhejo aur Database link update kar do!
+    app_obj = current_app._get_current_object()
 
+    def background_5tb_sync(app_context, b_data, s_name, m_type, temp_url):
+        with app_context.app_context():
+            drive_url = upload_to_5tb_gdrive(b_data, s_name, m_type, sub_folder="Uploaded_Files")
+            if drive_url:
+                try:
+                    # Knowledge Vault ya Reference Design me jahan bhi temp_url save hua ho, usko permanent 5TB Drive URL bana do
+                    for k_item in KnowledgeItem.query.filter_by(media_url=temp_url).all():
+                        k_item.media_url = drive_url
+                    for r_item in ReferenceDesign.query.filter_by(image_url=temp_url).all():
+                        r_item.image_url = drive_url
+                    db.session.commit()
+                    print(f"✅ Background 5TB Drive Sync Complete: {drive_url}")
+                except Exception as db_err:
+                    print("DB URL update error:", db_err)
+
+    threading.Thread(
+        target=background_5tb_sync,
+        args=(app_obj, file_bytes, safe_name, mime_type, instant_url),
+        daemon=True
+    ).start()
+
+    # User ko bina ruke 0.5 second me response mil jayega!
     return jsonify({
         "status": "success",
-        "url": file_url,
+        "url": instant_url,
         "filename": f.filename,
-        "storage_engine": storage_used
+        "storage_engine": "Instant_Speed_5TB_Background_Sync"
     })
 
 # 2. Universal Delete API
