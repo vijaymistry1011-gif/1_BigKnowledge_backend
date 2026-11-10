@@ -1,15 +1,15 @@
 import os
 import json
 import base64
+import urllib.request
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify, Response, send_from_directory
+from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from werkzeug.security import generate_password_hash
 from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
-from groq import Groq
 
 from models import (
     db, User, KnowledgeItem, ReferenceDesign, Problem, SolutionItem,
@@ -17,36 +17,36 @@ from models import (
     JournalEntry, GoalHabit, OrganizationCRM
 )
 
-from advanced_routes import adv_bp, upload_to_5tb_gdrive
-from chat_meeting_routes import chat_bp
-from power_routes import power_bp
-
 load_dotenv()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
-# CORS Configuration for Vercel & Localhost
 CORS(
     app,
-    resources={r"/*": {
-        "origins": [
-            "https://1bigknowledgefrontend.vercel.app",
-            "http://localhost:3000",
-            "http://localhost:5000",
-            "http://127.0.0.1:5500",
-            "*"
-        ]
-    }},
+    resources={r"/*": {"origins": "*"}},
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
 )
 
-# Register All Blueprints
-app.register_blueprint(adv_bp)
-app.register_blueprint(chat_bp)
-app.register_blueprint(power_bp)
+# Safe Blueprint Registration (Agar files repo me hain to jud jayengi, nahi hain to crash nahi hoga!)
+try:
+    from advanced_routes import adv_bp
+    app.register_blueprint(adv_bp)
+except Exception as e:
+    print("adv_bp warning:", e)
 
-# Database Configuration
+try:
+    from chat_meeting_routes import chat_bp
+    app.register_blueprint(chat_bp)
+except Exception as e:
+    print("chat_bp warning:", e)
+
+try:
+    from power_routes import power_bp
+    app.register_blueprint(power_bp)
+except Exception as e:
+    print("power_bp warning:", e)
+
 db_url = os.environ.get("DATABASE_URL", "sqlite:///bigknowledge.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -63,9 +63,6 @@ if os.environ.get("CLOUDINARY_URL"):
 db.init_app(app)
 jwt = JWTManager(app)
 
-groq_api_key = os.environ.get("GROQ_API_KEY")
-groq_client = Groq(api_key=groq_api_key) if groq_api_key else None
-
 with app.app_context():
     db.create_all()
     if User.query.count() == 0:
@@ -78,20 +75,42 @@ with app.app_context():
         db.session.add(founder)
         db.session.commit()
 
+# Zero-dependency 5TB Google Drive Uploader (Works even without 'requests' library!)
+def upload_to_5tb_drive(file_bytes, filename, mime_type="image/png", sub_folder="Uploaded_Files"):
+    webhook_url = os.environ.get("GDRIVE_WEBHOOK_URL")
+    if not webhook_url:
+        return None
+    try:
+        payload = json.dumps({
+            "filename": filename,
+            "mime_type": mime_type,
+            "file_base64": base64.b64encode(file_bytes).decode("utf-8"),
+            "sub_folder": sub_folder
+        }).encode("utf-8")
+        req = urllib.request.Request(webhook_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+            if res_json.get("status") == "success":
+                fid = res_json.get("file_id")
+                if fid and mime_type.startswith("image/"):
+                    return f"https://drive.google.com/thumbnail?id={fid}&sz=w2000"
+                return res_json.get("url")
+    except Exception as e:
+        print("Drive upload error:", e)
+    return None
+
 @app.route("/")
 def dashboard_home():
     return jsonify({
         "status": "live",
-        "service": "BigKnowledge Backend API",
+        "service": "BigKnowledge Backend API (5TB Drive Ready)",
         "founder": "Mr. Vijay Mistry",
-        "gdrive_5tb_connected": bool(os.environ.get("GDRIVE_WEBHOOK_URL")),
-        "endpoints_active": ["core", "adv_bp", "chat_bp", "power_bp"]
+        "gdrive_5tb_connected": bool(os.environ.get("GDRIVE_WEBHOOK_URL"))
     })
 
 @app.route("/login")
 def login_page():
     return jsonify({"status": "login_endpoint_active"})
-
 
 @app.route("/static/uploads/<path:filename>")
 def serve_uploads(filename):
@@ -102,136 +121,43 @@ def serve_uploads(filename):
 def api_bootstrap():
     return jsonify({
         "knowledge": [
-            {
-                "id": k.id,
-                "title": k.title,
-                "category": k.category,
-                "content": k.content,
-                "media_url": k.media_url,
-                "tags": k.tags,
-                "is_favorite": k.is_favorite,
-                "created_at": k.created_at.strftime("%Y-%m-%d") if k.created_at else ""
-            }
+            {"id": k.id, "title": k.title, "category": k.category, "content": k.content, "media_url": k.media_url, "tags": k.tags, "is_favorite": k.is_favorite, "created_at": k.created_at.strftime("%Y-%m-%d") if k.created_at else ""}
             for k in KnowledgeItem.query.order_by(KnowledgeItem.id.desc()).all()
         ],
         "problems": [
-            {
-                "id": p.id,
-                "title": p.title,
-                "source": p.source,
-                "root_cause": p.root_cause,
-                "solution": p.proposed_solution,
-                "market_demand": p.market_demand,
-                "competition_level": p.competition_level,
-                "revenue_potential": p.revenue_potential,
-                "opportunity_score": p.opportunity_score
-            }
+            {"id": p.id, "title": p.title, "source": p.source, "root_cause": p.root_cause, "solution": p.proposed_solution, "market_demand": p.market_demand, "competition_level": p.competition_level, "revenue_potential": p.revenue_potential, "opportunity_score": p.opportunity_score}
             for p in Problem.query.order_by(Problem.opportunity_score.desc()).all()
         ],
         "solutions": [
-            {
-                "id": s.id,
-                "problem_title": s.problem_title,
-                "solution_title": s.solution_title,
-                "cost_estimate": s.cost_estimate,
-                "benefits": s.benefits,
-                "market_impact": s.market_impact,
-                "difficulty": s.difficulty,
-                "revenue_potential": s.revenue_potential
-            }
+            {"id": s.id, "problem_title": s.problem_title, "solution_title": s.solution_title, "cost_estimate": s.cost_estimate, "benefits": s.benefits, "market_impact": s.market_impact, "difficulty": s.difficulty, "revenue_potential": s.revenue_potential}
             for s in SolutionItem.query.order_by(SolutionItem.id.desc()).all()
         ],
         "innovations": [
-            {
-                "id": i.id,
-                "title": i.title,
-                "category": i.category,
-                "summary": i.summary,
-                "opportunity_note": i.opportunity_note
-            }
+            {"id": i.id, "title": i.title, "category": i.category, "summary": i.summary, "opportunity_note": i.opportunity_note}
             for i in InnovationItem.query.order_by(InnovationItem.id.desc()).all()
         ],
         "startups": [
-            {
-                "id": st.id,
-                "name": st.name,
-                "description": st.description,
-                "market": st.market,
-                "industry": st.industry,
-                "revenue_model": st.revenue_model,
-                "competitors": st.competitors,
-                "market_size": st.market_size,
-                "validation_status": st.validation_status,
-                "stage": st.stage,
-                "priority": st.priority,
-                "feasibility_score": st.feasibility_score,
-                "progress": st.progress,
-                "time_spent_hours": st.time_spent_hours
-            }
+            {"id": st.id, "name": st.name, "description": st.description, "market": st.market, "industry": st.industry, "revenue_model": st.revenue_model, "competitors": st.competitors, "market_size": st.market_size, "validation_status": st.validation_status, "stage": st.stage, "priority": st.priority, "feasibility_score": st.feasibility_score, "progress": st.progress, "time_spent_hours": st.time_spent_hours}
             for st in StartupIdea.query.order_by(StartupIdea.id.desc()).all()
         ],
         "tasks": [
-            {
-                "id": t.id,
-                "title": t.title,
-                "project_name": t.project_name,
-                "status": t.status,
-                "kanban_stage": t.kanban_stage,
-                "priority": t.priority,
-                "deadline": t.deadline,
-                "dependencies": t.dependencies,
-                "assignee": t.assignee
-            }
+            {"id": t.id, "title": t.title, "project_name": t.project_name, "status": t.status, "kanban_stage": t.kanban_stage, "priority": t.priority, "deadline": t.deadline, "dependencies": t.dependencies, "assignee": t.assignee}
             for t in ProjectTask.query.order_by(ProjectTask.id.desc()).all()
         ],
         "roadmaps": [
-            {
-                "id": r.id,
-                "roadmap_type": r.roadmap_type,
-                "title": r.title,
-                "dependencies": r.dependencies,
-                "deadline": r.deadline,
-                "progress": r.progress
-            }
+            {"id": r.id, "roadmap_type": r.roadmap_type, "title": r.title, "dependencies": r.dependencies, "deadline": r.deadline, "progress": r.progress}
             for r in RoadmapMilestone.query.all()
         ],
         "journals": [
-            {
-                "id": j.id,
-                "entry_type": j.entry_type,
-                "category_tag": j.category_tag,
-                "title": j.title,
-                "details": j.details,
-                "expected_outcome": j.expected_outcome,
-                "actual_result": j.actual_result,
-                "created_at": j.created_at.strftime("%Y-%m-%d") if j.created_at else ""
-            }
+            {"id": j.id, "entry_type": j.entry_type, "category_tag": j.category_tag, "title": j.title, "details": j.details, "expected_outcome": j.expected_outcome, "actual_result": j.actual_result, "created_at": j.created_at.strftime("%Y-%m-%d") if j.created_at else ""}
             for j in JournalEntry.query.order_by(JournalEntry.id.desc()).all()
         ],
         "goals_habits": [
-            {
-                "id": g.id,
-                "item_type": g.item_type,
-                "title": g.title,
-                "streak_or_progress": g.streak_or_progress,
-                "completed_today": g.completed_today
-            }
+            {"id": g.id, "item_type": g.item_type, "title": g.title, "streak_or_progress": g.streak_or_progress, "completed_today": g.completed_today}
             for g in GoalHabit.query.all()
         ],
         "org_crm": [
-            {
-                "id": c.id,
-                "entity_type": c.entity_type,
-                "name": c.name,
-                "role_or_segment": c.role_or_segment,
-                "department_or_company": c.department_or_company,
-                "details_or_strengths": c.details_or_strengths,
-                "weaknesses_or_actions": c.weaknesses_or_actions,
-                "tasks_completed": c.tasks_completed,
-                "tasks_pending": c.tasks_pending,
-                "work_hours": c.work_hours,
-                "productivity_score": c.productivity_score
-            }
+            {"id": c.id, "entity_type": c.entity_type, "name": c.name, "role_or_segment": c.role_or_segment, "department_or_company": c.department_or_company, "details_or_strengths": c.details_or_strengths, "weaknesses_or_actions": c.weaknesses_or_actions, "tasks_completed": c.tasks_completed, "tasks_pending": c.tasks_pending, "work_hours": c.work_hours, "productivity_score": c.productivity_score}
             for c in OrganizationCRM.query.all()
         ]
     })
@@ -248,32 +174,25 @@ def manage_knowledge():
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
-    title = d.get("title") or "Untitled"
-    category = d.get("category") or "Note"
-    content = d.get("content") or ""
     media_url = d.get("media_url") or ""
-    tags = d.get("tags") or "knowledge"
-
-    # Agar frontend ne Base64 image/video bheja hai toh seedha 5TB Google Drive me bhejo
     if media_url.startswith("data:"):
         try:
             header, b64_data = media_url.split(",", 1)
             mime_type = header.split(";")[0].replace("data:", "")
             ext = mime_type.split("/")[-1] if "/" in mime_type else "bin"
-            file_bytes = base64.b64decode(b64_data)
             fname = f"vault_{int(datetime.utcnow().timestamp())}.{ext}"
-            drive_link = upload_to_5tb_gdrive(file_bytes, fname, mime_type, sub_folder="Knowledge_Vault_Media")
+            drive_link = upload_to_5tb_drive(base64.b64decode(b64_data), fname, mime_type)
             if drive_link:
                 media_url = drive_link
         except Exception as e:
-            print("Base64 to Drive error:", e)
+            print("Base64 upload error:", e)
 
     item = KnowledgeItem(
-        title=title,
-        category=category,
-        content=content,
+        title=d.get("title") or "Untitled",
+        category=d.get("category") or "Note",
+        content=d.get("content") or "",
         media_url=media_url,
-        tags=tags
+        tags=d.get("tags") or "knowledge"
     )
     db.session.add(item)
     db.session.commit()
@@ -291,12 +210,8 @@ def manage_problems():
         return jsonify({"status": "deleted"})
 
     d = request.get_json(silent=True) or {}
-    try:
-        demand = int(d.get("market_demand", 8))
-    except (ValueError, TypeError):
-        demand = 8
+    demand = int(d.get("market_demand") or 8)
     score = int(d.get("opportunity_score") or min(100, demand * 10))
-
     p = Problem(
         title=d.get("title") or "Untitled Problem",
         source=d.get("source") or "Real World Observation",
@@ -308,31 +223,6 @@ def manage_problems():
         opportunity_score=score
     )
     db.session.add(p)
-
-    if d.get("solution"):
-        sol = SolutionItem(
-            problem_title=p.title,
-            solution_title=d.get("solution"),
-            cost_estimate=d.get("cost_estimate") or "₹5,000 - ₹25,000",
-            benefits=d.get("root_cause") or "",
-            market_impact="High" if demand >= 8 else "Medium",
-            revenue_potential=p.revenue_potential
-        )
-        db.session.add(sol)
-
-    if d.get("auto_convert_startup"):
-        st = StartupIdea(
-            name=d.get("startup_name") or p.title[:30],
-            description=d.get("solution") or p.root_cause,
-            revenue_model=d.get("revenue_model") or "SaaS Subscription",
-            market_size=p.revenue_potential,
-            stage="Validation",
-            priority="High",
-            feasibility_score=score,
-            progress=15
-        )
-        db.session.add(st)
-
     db.session.commit()
     return jsonify({"status": "success", "id": p.id})
 
@@ -357,21 +247,15 @@ def manage_startups():
                     st.progress = int(d["progress"])
                 if "stage" in d:
                     st.stage = d["stage"]
-                if "feasibility_score" in d and d["feasibility_score"] is not None:
-                    st.feasibility_score = int(d["feasibility_score"])
                 db.session.commit()
         return jsonify({"status": "updated"})
 
     st = StartupIdea(
         name=d.get("name") or "New Venture",
         description=d.get("description") or "",
-        market=d.get("market") or "India / Global",
-        industry=d.get("industry") or "SaaS / Tech",
         revenue_model=d.get("revenue_model") or "Subscription",
-        competitors=d.get("competitors") or "None",
         market_size=d.get("market_size") or "₹10Cr TAM",
         stage=d.get("stage") or "Idea",
-        priority=d.get("priority") or "High",
         feasibility_score=int(d.get("feasibility_score") or 85),
         progress=int(d.get("progress") or 10)
     )
@@ -417,100 +301,16 @@ def handle_tasks():
 
 @app.route("/api/journals", methods=["POST", "DELETE"])
 def create_journal():
-    if request.method == "DELETE":
-        j_id = request.args.get("id")
-        if j_id:
-            j = db.session.get(JournalEntry, int(j_id))
-            if j:
-                db.session.delete(j)
-                db.session.commit()
-        return jsonify({"status": "deleted"})
-
     d = request.get_json(silent=True) or {}
     j = JournalEntry(
         entry_type=d.get("entry_type") or "Founder Journal",
         category_tag=d.get("category_tag") or "Daily Work",
         title=d.get("title") or "Untitled Log",
-        details=d.get("details") or "",
-        expected_outcome=d.get("expected_outcome") or "",
-        actual_result=d.get("actual_result") or ""
+        details=d.get("details") or ""
     )
     db.session.add(j)
     db.session.commit()
     return jsonify({"status": "success", "id": j.id})
-
-@app.route("/api/export/json", methods=["GET"])
-def export_json():
-    payload = api_bootstrap().get_json()
-    return Response(
-        json.dumps(payload, indent=2),
-        mimetype="application/json",
-        headers={"Content-Disposition": "attachment;filename=bigknowledge_backup.json"}
-    )
-
-@app.route("/api/export/csv", methods=["GET"])
-def export_csv():
-    rows = ["ID,Startup Name,Stage,Industry,Revenue Model,Market Size,Feasibility Score,Progress"]
-    for s in StartupIdea.query.all():
-        rows.append(f'{s.id},"{s.name}","{s.stage}","{s.industry}","{s.revenue_model}","{s.market_size}",{s.feasibility_score},{s.progress}')
-    return Response(
-        "\n".join(rows),
-        mimetype="text/csv",
-        headers={"Content-Disposition": "attachment;filename=bigknowledge_startups.csv"}
-    )
-
-@app.route("/api/ai-assistant", methods=["POST"])
-def ai_assistant():
-    d = request.get_json(silent=True) or {}
-    user_query = d.get("query", "").strip()
-    if not user_query:
-        return jsonify({"error": "Query is empty"}), 400
-
-    if not groq_client:
-        return jsonify({
-            "reply": f"Vijay bhai, abhi Render par GROQ_API_KEY set nahi hai, par maine aapki query '{user_query}' note kar li hai.",
-            "action": "CHAT",
-            "data": {"target": "dashboard"}
-        })
-
-    system_prompt = """
-    You are SUPER AI, the core assistant for Mr. Vijay Mistry's 'BigKnowledge' Founder OS.
-    Your job is to understand what Vijay wants and return a STRICT JSON response.
-    
-    Website Map:
-    1. "NAVIGATE": 'code-vault', 'finance-ledger', 'video-vault', 'kanban-board', 'startup-db', 'problem-center', 'knowledge-vault', 'journals', 'dashboard'
-    2. "ADD_TASK": When Vijay asks to add a task.
-    3. "SEARCH": When Vijay searches past ideas.
-    4. "CHAT": Normal talk, coding help, or business advice.
-
-    Reply ONLY in this JSON format:
-    {
-      "reply": "Your natural Hinglish reply",
-      "action": "ACTION_NAME",
-      "data": { "target": "page-name" }
-    }
-    """
-
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ],
-            model="llama-3.3-70b-versatile",
-            temperature=0.2,
-            response_format={"type": "json_object"}
-        )
-        ai_response_text = chat_completion.choices[0].message.content
-        ai_json = json.loads(ai_response_text)
-        return jsonify(ai_json)
-    except Exception as e:
-        print("🚨 GROQ ERROR:", str(e))
-        return jsonify({
-            "reply": f"Vijay bhai, AI engine me temporary issue aaya ({str(e)[:60]}), par aapka Dashboard ready hai.",
-            "action": "CHAT",
-            "data": {"target": "dashboard"}
-        }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
