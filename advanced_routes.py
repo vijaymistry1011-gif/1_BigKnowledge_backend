@@ -57,7 +57,6 @@ DEFAULT_STORE_DATA = {
 }
 
 def upload_to_5tb_gdrive(file_bytes, filename, mime_type="application/octet-stream", sub_folder="Uploaded_Files"):
-    """Uploads file to 5TB Google Drive using standard urllib (Zero extra dependencies)"""
     webhook_url = os.environ.get("GDRIVE_WEBHOOK_URL")
     if not webhook_url:
         return None
@@ -100,7 +99,7 @@ def save_custom_store(data):
     with open(CUSTOM_STORE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-# 1. SUPERFAST INSTANT UPLOAD API (0.5 Second Response + Background 5TB Drive Sync)
+# 1. SUPERFAST INSTANT UPLOAD API + AUTO-SAVE TO KNOWLEDGE VAULT
 @adv_bp.route("/api/adv/upload_file", methods=["POST"])
 def upload_real_file():
     if "file" not in request.files:
@@ -113,7 +112,7 @@ def upload_real_file():
     mime_type = f.mimetype or "application/octet-stream"
     file_bytes = f.read()
 
-    # STEP A: Turant (0.2 second me) Render par save karo taaki website bilkul wait na kare!
+    # STEP A: Turant (0.2s me) render par save karo taaki button fast chale!
     save_path = os.path.join(UPLOAD_DIR, safe_name)
     with open(save_path, "wb") as out_file:
         out_file.write(file_bytes)
@@ -121,36 +120,53 @@ def upload_real_file():
     base_url = request.host_url.rstrip("/")
     instant_url = f"{base_url}/static/uploads/{safe_name}"
 
-    # STEP B: Background me chupchap 5TB Google Drive me bhejo aur Database link update kar do!
+    # STEP B: Auto-Save in Database (Image/Video Vault me turant dikhega)
+    cat = "Image" if mime_type.startswith("image/") else ("Video" if mime_type.startswith("video/") else "Document")
+    new_vault_item = KnowledgeItem(
+        title=request.form.get("title") or f.filename,
+        category=cat,
+        content=f"Uploaded File: {f.filename}",
+        media_url=instant_url,
+        tags=f"uploaded,{cat.lower()},5tb-vault"
+    )
+    db.session.add(new_vault_item)
+    db.session.commit()
+    saved_item_id = new_vault_item.id
+
+    # STEP C: Background Sync to 5TB Google Drive
     app_obj = current_app._get_current_object()
 
-    def background_5tb_sync(app_context, b_data, s_name, m_type, temp_url):
+    def background_5tb_sync(app_context, b_data, s_name, m_type, temp_url, item_id):
         with app_context.app_context():
             drive_url = upload_to_5tb_gdrive(b_data, s_name, m_type, sub_folder="Uploaded_Files")
             if drive_url:
                 try:
-                    # Knowledge Vault ya Reference Design me jahan bhi temp_url save hua ho, usko permanent 5TB Drive URL bana do
+                    item = db.session.get(KnowledgeItem, item_id)
+                    if item:
+                        item.media_url = drive_url
                     for k_item in KnowledgeItem.query.filter_by(media_url=temp_url).all():
                         k_item.media_url = drive_url
                     for r_item in ReferenceDesign.query.filter_by(image_url=temp_url).all():
                         r_item.image_url = drive_url
                     db.session.commit()
-                    print(f"✅ Background 5TB Drive Sync Complete: {drive_url}")
+                    print(f"✅ 5TB Google Drive Background Sync Complete: {drive_url}")
                 except Exception as db_err:
                     print("DB URL update error:", db_err)
 
     threading.Thread(
         target=background_5tb_sync,
-        args=(app_obj, file_bytes, safe_name, mime_type, instant_url),
+        args=(app_obj, file_bytes, safe_name, mime_type, instant_url, saved_item_id),
         daemon=True
     ).start()
 
-    # User ko bina ruke 0.5 second me response mil jayega!
     return jsonify({
         "status": "success",
+        "id": saved_item_id,
         "url": instant_url,
+        "media_url": instant_url,
         "filename": f.filename,
-        "storage_engine": "Instant_Speed_5TB_Background_Sync"
+        "category": cat,
+        "storage_engine": "Instant_Vault_Plus_5TB_Drive"
     })
 
 # 2. Universal Delete API
